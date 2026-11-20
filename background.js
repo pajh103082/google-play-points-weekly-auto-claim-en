@@ -77,8 +77,8 @@ function hasFutureDate(info) {
   const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
   const MON = '(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?';
   let mo = 0, da = 0, m;
-  if ((m = info.match(new RegExp('\\b' + MON + '\\s+(\\d{1,2})\\b', 'i')))) { mo = MONTHS[m[1].slice(0, 3).toLowerCase()]; da = +m[2]; }
-  else if ((m = info.match(new RegExp('\\b(\\d{1,2})\\s+' + MON, 'i')))) { mo = MONTHS[m[2].slice(0, 3).toLowerCase()]; da = +m[1]; }
+  if ((m = info.match(new RegExp('\\b' + MON + '\\s*(\\d{1,2})(?!\\d)', 'i')))) { mo = MONTHS[m[1].slice(0, 3).toLowerCase()]; da = +m[2]; }
+  else if ((m = info.match(new RegExp('(?<!\\d)(\\d{1,2})\\s+' + MON, 'i')))) { mo = MONTHS[m[2].slice(0, 3).toLowerCase()]; da = +m[1]; }
   else if ((m = info.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*日/))) { mo = +m[1]; da = +m[2]; }
   if (!mo || !da) return false;
   const now = new Date();
@@ -89,13 +89,14 @@ function hasFutureDate(info) {
   return rel > today;
 }
 
-// On update to v1.2.1: accounts marked "already claimed" this week without a future date may have been misjudged
-// by v1.2.0 -> mark them "new" so they are checked again
+// On install / update: every account marked "already claimed" this week is set back to "new" and checked once more
+// (v1.2.0 treated "no date" as claimed; before v1.2.3 the claimable card was misread as grey). Re-checking is cheap:
+// accounts that really were claimed are still "already claimed" afterwards.
 async function recheckDoubtfulAlready() {
   const s = await loadState();
   let changed = 0;
   for (const a of Object.values(s.accounts)) {
-    if (a.status === 'already' && !hasFutureDate(a.info)) { a.status = 'new'; changed++; }
+    if (a.status === 'already') { a.status = 'new'; changed++; }
   }
   if (changed) {
     await chrome.storage.local.set({ accounts: s.accounts, lastRun: 0 });
@@ -282,19 +283,36 @@ async function perksPage(doClaim) {
     }
     return '';
   };
+  // v1.2.3 (real page, 2026-11-21): the "Claim" <button> inside both prize cards has inert + aria-hidden (decoration only);
+  // the only difference is `disabled`: this week's prize = disabled=false, next prize = disabled=true.
+  // The element you actually click is the whole card, a <div role="button">. So inert must NOT count as disabled.
+  const isDisabled = (b) => !!(b.disabled || b.getAttribute('aria-disabled') === 'true');
+  const clickTarget = (b) => b.closest('[role="button"]') || b;   // the claimable card's wrapper is role=button
+  // Every clickable element in the section whose text is exactly "Claim" (button / link / role=button); innermost only
+  const claimCtrls = (root) => {
+    const all = [...root.querySelectorAll('button,a,[role="button"]')]
+      .filter((x) => /^(Claim|Collect|Claim prize|領取|立即領取)$/i.test(clean(x.textContent)));
+    return all.filter((x) => !all.some((y) => y !== x && x.contains(y)));
+  };
+  // v1.2.2: the "Weekly prize" section can hold several cards: this week's prize ("Expires Nov 27", claimable)
+  // and the next prize ("Available on Nov 27", grey). Each Claim control is mapped to its own card; a claimable one wins.
   const findWeekly = () => {
     const h = [...document.querySelectorAll('h1,h2,h3,h4,div,span')].find(
       (e) => e.childElementCount === 0 && /^(Weekly prize|每週獎勵)/i.test(clean(e.textContent)));
     if (!h) return null;
-    let c = h.parentElement;
-    for (let i = 0; i < 8 && c; i++) {
-      const b = [...c.querySelectorAll('button')].find((x) => /Claim|Collect|領取/i.test(x.textContent));
-      if (b) return { card: c, btn: b };
-      c = c.parentElement;
-    }
-    return { card: null, btn: null };
+    let sec = h.parentElement;
+    for (let i = 0; i < 8 && sec && claimCtrls(sec).length === 0; i++) sec = sec.parentElement;
+    if (!sec || claimCtrls(sec).length === 0) return { card: null, btn: null, cards: [] };
+    // sec = the first ancestor of the heading that contains a Claim control = heading + its row of cards.
+    // Not widened further, so Claim buttons of other perks (e.g. game items) are never included.
+    const cards = claimCtrls(sec).map((b) => {
+      let k = b;   // climb until going higher would include another Claim control = this control's own card
+      while (k.parentElement && k.parentElement !== sec && claimCtrls(k.parentElement).length === 1) k = k.parentElement;
+      return { btn: b, card: k, open: !isDisabled(b) };
+    });
+    const pick = cards.find((x) => x.open) || cards[0];
+    return { card: pick.card, btn: pick.btn, cards };
   };
-  const isDisabled = (b) => b.disabled || b.getAttribute('aria-disabled') === 'true' || b.hasAttribute('inert');
 
   if (/accounts\.google\.com/.test(location.href)) return { status: 'login', info: 'Chrome is not signed in to Google' };
   // Accounts that are not Play Points members are redirected from perks to /store/points/enroll
@@ -321,7 +339,8 @@ async function perksPage(doClaim) {
   }
   const email = emailOf();
   const cardText = (x) => clean(x && x.card ? x.card.innerText : '')
-    .replace(/^(Weekly prize|每週獎勵)\s*/i, '').replace(/lock\s*/g, '').slice(0, 80);
+    .replace(/^(Weekly prize|每週獎勵)\s*/i, '').replace(/\b(lock|hourglass)\s*/g, '').slice(0, 80);
+  const allCards = (x) => (x && x.cards ? x.cards : []).map((c) => (c.open ? '[open] ' : '[grey] ') + cardText({ card: c.card })).join(' | ').slice(0, 200);
 
   if (!w || !w.btn) {
     if (other === 'not_member') return { status: 'not_member', email, info: 'this account has not joined Play Points' };
@@ -330,46 +349,74 @@ async function perksPage(doClaim) {
     return { status: 'notfound', email, info: 'weekly prize card not found (the page may have changed)' };
   }
   const info = cardText(w);
-  if (isDisabled(w.btn)) {
-    // A grey button means either "next prize not available yet" or "already claimed this week" - both look the same
-    // and show "Available on Nov 20". Only a date AFTER today means this week's prize was claimed (waiting for the
-    // next one). A date today or earlier, or no readable date at all (e.g. "Available today" or a time on release
-    // day) -> treated as not available yet, try again in 2 hours. (v1.2.0 treated "no date" as already claimed.)
+  if (isDisabled(w.btn)) {   // getting here means every Claim control in the section is grey
+    // Use only the "Available on" date, never the "Expires" date of this week's card
+    const dateText = clean(w.cards.map((c) => cardText({ card: c.card })).join(' '))
+      .replace(/(Expires?( on)?|到期日|到期)[：:\s]*([A-Za-z]{3,9}\.?\s+\d{1,2}|\d{1,2}\s+[A-Za-z]{3,9}|\d{1,2}\s*月\s*\d{1,2}\s*日)/gi, '');
+    // Grey can mean "next prize not available yet" or "already claimed this week". Only an "Available on" date AFTER
+    // today means claimed (waiting for the next one); a date today or earlier, or no readable date -> not available yet.
     const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
     const MON = '(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?';
     let mo = 0, da = 0, m;
-    if ((m = info.match(new RegExp('\\b' + MON + '\\s+(\\d{1,2})\\b', 'i')))) { mo = MONTHS[m[1].slice(0, 3).toLowerCase()]; da = +m[2]; }
-    else if ((m = info.match(new RegExp('\\b(\\d{1,2})\\s+' + MON, 'i')))) { mo = MONTHS[m[2].slice(0, 3).toLowerCase()]; da = +m[1]; }
-    else if ((m = info.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*日/))) { mo = +m[1]; da = +m[2]; }
+    if ((m = dateText.match(new RegExp('\\b' + MON + '\\s*(\\d{1,2})(?!\\d)', 'i')))) { mo = MONTHS[m[1].slice(0, 3).toLowerCase()]; da = +m[2]; }
+    else if ((m = dateText.match(new RegExp('(?<!\\d)(\\d{1,2})\\s+' + MON, 'i')))) { mo = MONTHS[m[2].slice(0, 3).toLowerCase()]; da = +m[1]; }
+    else if ((m = dateText.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*日/))) { mo = +m[1]; da = +m[2]; }
     if (mo && da) {
       const now = new Date();
       const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
       let rel = new Date(now.getFullYear(), mo - 1, da);
       if (rel - today > 180 * 864e5) rel = new Date(now.getFullYear() - 1, mo - 1, da);
       if (rel - today < -180 * 864e5) rel = new Date(now.getFullYear() + 1, mo - 1, da);
-      if (rel > today) return { status: 'already', email, info };
+      if (rel > today) return { status: 'already', email, info: allCards(w) };
     }
-    return { status: 'not_open', email, info: info + (mo ? '' : ' (no date for the next prize, treated as not available yet)') };
+    return { status: 'not_open', email, info: allCards(w) + (mo ? '' : ' (no "Available on" date found, treated as not available yet)') };
   }
-  if (!doClaim) return { status: 'claimable', email, info };
+  if (!doClaim) return { status: 'claimable', email, info: allCards(w) };
 
-  w.btn.click();
-  await sleep(4000);
+  // Real flow (verified on 2026-11-21 with the Traditional Chinese page):
+  //   1. click the whole card -> a dialog "Tap to see your prize! Up to 100 Play Points" (zh: 按一下即可查看獎勵內容)
+  //   2. click the gift inside the dialog -> "+5 You got 5 Play Points! ..." (zh: +5 你已獲得 5 點 Play 點數)
+  //   3. close the dialog ("Close dialog" button, or "Done"). After reloading, the claimable card is gone and only
+  //      the grey "Available on" card is left.
+  const visibleDialog = () => [...document.querySelectorAll('[role="dialog"],[role="alertdialog"],[aria-modal="true"]')]
+    .find((d) => d.getClientRects().length > 0);
+  const waitDialog = async (test, ms) => {
+    for (let t = 0; t < ms; t += 300) {
+      const d = visibleDialog();
+      if (d && (!test || test(clean(d.innerText)))) return d;
+      await sleep(300);
+    }
+    return visibleDialog();
+  };
+  const GOT = /You('ve)? (got|won|earned)|\+\s*\d+\s*(Play|points|點)|你已獲得|已獲得\s*\d+/i;
+  const REVEAL = /Tap to|Click to|see (your )?(prize|reward)|reveal|Up to \d+|查看獎勵內容|按一下即可|最多可獲得/i;
+
+  clickTarget(w.btn).click();
+  let dlg = await waitDialog(null, 8000);
   let result = '';
-  for (let k = 0; k < 3; k++) {
-    const dlg = document.querySelector('[role="dialog"],[role="alertdialog"],[aria-modal="true"]');
-    const txt = clean(dlg ? dlg.innerText : document.body.innerText);
-    if (APP_ONLY.test(txt)) return { status: 'app_only', email, info: 'the website asks you to claim in the Play Store app on Android' };
-    if (!dlg) break;
-    result = txt.slice(0, 120);
-    // If there is a choice, pick Play Points; then press a Claim / OK style button
-    const pick = [...dlg.querySelectorAll('button,[role="button"],[role="radio"]')].find((x) => /Play Points|Play 點數/.test(x.textContent));
-    if (pick && k === 0) { pick.click(); await sleep(1500); }
-    const b = [...dlg.querySelectorAll('button')].find((x) => !isDisabled(x) && /Claim|OK|Done|Got it|Close|領取|確定|完成|知道了|關閉/i.test(x.textContent));
-    if (!b) break;
-    b.click();
-    await sleep(3000);
+  if (!dlg) return { status: 'clicked', email, info, result: 'clicked the card but no dialog appeared' };
+  let txt = clean(dlg.innerText);
+  if (APP_ONLY.test(txt)) return { status: 'app_only', email, info: 'the website asks you to claim in the Play Store app on Android' };
+  if (!GOT.test(txt)) {
+    // Step 2: open the gift (a control whose text looks like "Tap to see your prize"; otherwise the first non-close control)
+    const ctrls = [...dlg.querySelectorAll('button,[role="button"]')].filter((x) => !/Close|關閉/i.test(x.getAttribute('aria-label') || ''));
+    const gift = ctrls.find((x) => REVEAL.test(clean(x.textContent))) || ctrls.find((x) => clean(x.textContent));
+    if (gift) {
+      gift.click();
+      dlg = await waitDialog((t) => GOT.test(t) || APP_ONLY.test(t), 10000) || dlg;
+      txt = clean(dlg.innerText);
+      if (APP_ONLY.test(txt)) return { status: 'app_only', email, info: 'the website asks you to claim in the Play Store app on Android' };
+    }
   }
+  result = txt.replace(/^Close dialog\s*|^關閉對話方塊\s*/i, '').slice(0, 120);
+  // Step 3: close the dialog
+  const closeBtn = dlg.querySelector('[aria-label="Close dialog"],[aria-label="關閉對話方塊"],[aria-label*="Close"],[aria-label*="關閉"]');
+  if (closeBtn) closeBtn.click();
+  else {
+    const done = [...dlg.querySelectorAll('*')].find((x) => /^(Done|OK|完成|確定)$/i.test(clean(x.textContent)) && x.closest('[jsaction*="click"],button,[role="button"]'));
+    if (done) (done.closest('[jsaction*="click"],button,[role="button"]') || done).click();
+  }
+  await sleep(1500);
   return { status: 'clicked', email, info, result };
 }
 
@@ -443,7 +490,7 @@ async function writeStatus(force) {
     const s = await loadState();
     const list = Object.entries(s.accounts).filter(([e]) => allowed(s, e));
     const pending = list.filter(([, a]) => !DONE.includes(a.status)).map(([e]) => e);
-    const mask = (e) => e.replace(/^(.{2}).*?(.{0,2})@.*$/, '$1***$2');   // keep only the first/last 2 characters, never the full email
+    const mask = (e) => e.replace(/^(.{2}).*?(.{0,3})@.*$/, '$1***$2');   // keep only the first 2 / last 3 characters, never the full email
     const obj = {
       week: s.week, allDone: list.length > 0 && pending.length === 0, accounts: list.length, pending: pending.length,
       detail: list.map(([e, a]) => ({ account: mask(e), status: a.status, info: a.info || '', time: a.time || '' }))

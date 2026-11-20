@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Google Play Points Weekly Prize Auto Claim",
-  "version": "1.2.1",
+  "version": "1.2.4",
   "description": "Automatically claims the Google Play Points weekly prize for every Google account signed in to Chrome.",
   "permissions": [
     "alarms",
