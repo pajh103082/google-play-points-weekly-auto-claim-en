@@ -63,11 +63,45 @@ function setupAlarm() {
   chrome.alarms.create('gp-tick', { delayInMinutes: 1, periodInMinutes: 30 });
 }
 
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener(async () => {
+  await recheckDoubtfulAlready();
   setupAlarm();
-  refreshBadge();
-  writeStatus(true);
+  await refreshBadge();
+  await writeStatus(true);
+  maybeRun(false, 'startup');
 });
+
+// Same rule as inside the injected function: does the text contain a date AFTER today (Nov 20, 20 Nov, 11月20日)?
+function hasFutureDate(info) {
+  info = info || '';
+  const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+  const MON = '(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?';
+  let mo = 0, da = 0, m;
+  if ((m = info.match(new RegExp('\\b' + MON + '\\s+(\\d{1,2})\\b', 'i')))) { mo = MONTHS[m[1].slice(0, 3).toLowerCase()]; da = +m[2]; }
+  else if ((m = info.match(new RegExp('\\b(\\d{1,2})\\s+' + MON, 'i')))) { mo = MONTHS[m[2].slice(0, 3).toLowerCase()]; da = +m[1]; }
+  else if ((m = info.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*日/))) { mo = +m[1]; da = +m[2]; }
+  if (!mo || !da) return false;
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  let rel = new Date(now.getFullYear(), mo - 1, da);
+  if (rel - today > 180 * 864e5) rel = new Date(now.getFullYear() - 1, mo - 1, da);
+  if (rel - today < -180 * 864e5) rel = new Date(now.getFullYear() + 1, mo - 1, da);
+  return rel > today;
+}
+
+// On update to v1.2.1: accounts marked "already claimed" this week without a future date may have been misjudged
+// by v1.2.0 -> mark them "new" so they are checked again
+async function recheckDoubtfulAlready() {
+  const s = await loadState();
+  let changed = 0;
+  for (const a of Object.values(s.accounts)) {
+    if (a.status === 'already' && !hasFutureDate(a.info)) { a.status = 'new'; changed++; }
+  }
+  if (changed) {
+    await chrome.storage.local.set({ accounts: s.accounts, lastRun: 0 });
+    await addLog('—', 'new', `re-checking ${changed} account(s) that may have been wrongly marked "already claimed"`);
+  }
+}
 
 chrome.runtime.onStartup.addListener(() => {
   setupAlarm();
@@ -298,8 +332,9 @@ async function perksPage(doClaim) {
   const info = cardText(w);
   if (isDisabled(w.btn)) {
     // A grey button means either "next prize not available yet" or "already claimed this week" - both look the same
-    // and show "Available on Nov 20". Date after today -> this week's prize was claimed (waiting for the next one);
-    // date today or earlier -> this week's prize is not out yet, try again later.
+    // and show "Available on Nov 20". Only a date AFTER today means this week's prize was claimed (waiting for the
+    // next one). A date today or earlier, or no readable date at all (e.g. "Available today" or a time on release
+    // day) -> treated as not available yet, try again in 2 hours. (v1.2.0 treated "no date" as already claimed.)
     const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
     const MON = '(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?';
     let mo = 0, da = 0, m;
@@ -312,9 +347,9 @@ async function perksPage(doClaim) {
       let rel = new Date(now.getFullYear(), mo - 1, da);
       if (rel - today > 180 * 864e5) rel = new Date(now.getFullYear() - 1, mo - 1, da);
       if (rel - today < -180 * 864e5) rel = new Date(now.getFullYear() + 1, mo - 1, da);
-      if (rel <= today) return { status: 'not_open', email, info };
+      if (rel > today) return { status: 'already', email, info };
     }
-    return { status: 'already', email, info };
+    return { status: 'not_open', email, info: info + (mo ? '' : ' (no date for the next prize, treated as not available yet)') };
   }
   if (!doClaim) return { status: 'claimable', email, info };
 
@@ -408,7 +443,11 @@ async function writeStatus(force) {
     const s = await loadState();
     const list = Object.entries(s.accounts).filter(([e]) => allowed(s, e));
     const pending = list.filter(([, a]) => !DONE.includes(a.status)).map(([e]) => e);
-    const obj = { week: s.week, allDone: list.length > 0 && pending.length === 0, accounts: list.length, pending: pending.length };
+    const mask = (e) => e.replace(/^(.{2}).*?(.{0,2})@.*$/, '$1***$2');   // keep only the first/last 2 characters, never the full email
+    const obj = {
+      week: s.week, allDone: list.length > 0 && pending.length === 0, accounts: list.length, pending: pending.length,
+      detail: list.map(([e, a]) => ({ account: mask(e), status: a.status, info: a.info || '', time: a.time || '' }))
+    };
     const path = await statusPath();
     const key = path + JSON.stringify(obj);
     const prev = (await chrome.storage.local.get(['statusWritten'])).statusWritten;
