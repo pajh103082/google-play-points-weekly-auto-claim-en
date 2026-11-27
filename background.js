@@ -391,11 +391,18 @@ async function perksPage(doClaim) {
   const GOT = /You('ve)? (got|won|earned)|\+\s*\d+\s*(Play|points|點)|你已獲得|已獲得\s*\d+/i;
   const REVEAL = /Tap to|Click to|see (your )?(prize|reward)|reveal|Up to \d+|查看獎勵內容|按一下即可|最多可獲得/i;
 
+  // v1.2.5: the dialog is empty for a moment (only "Close dialog") before its content appears, so wait for the content
+  // before clicking the gift. In a background tab the animation runs through raf_shim.js on timers, which Chrome limits
+  // to about once a second there, so the waits are longer.
+  const bg = document.hidden ? ' (background tab)' : '';
   clickTarget(w.btn).click();
-  let dlg = await waitDialog(null, 8000);
+  let dlg = await waitDialog((t) => REVEAL.test(t) || GOT.test(t) || APP_ONLY.test(t), 20000);
   let result = '';
-  if (!dlg) return { status: 'clicked', email, info, result: 'clicked the card but no dialog appeared' };
+  if (!dlg) return { status: 'clicked', email, info, result: 'clicked the card but no dialog appeared' + bg };
   let txt = clean(dlg.innerText);
+  if (!(REVEAL.test(txt) || GOT.test(txt) || APP_ONLY.test(txt))) {
+    return { status: 'clicked', email, info, result: 'the dialog stayed empty, no gift appeared' + bg };
+  }
   if (APP_ONLY.test(txt)) return { status: 'app_only', email, info: 'the website asks you to claim in the Play Store app on Android' };
   if (!GOT.test(txt)) {
     // Step 2: open the gift (a control whose text looks like "Tap to see your prize"; otherwise the first non-close control)
@@ -403,12 +410,14 @@ async function perksPage(doClaim) {
     const gift = ctrls.find((x) => REVEAL.test(clean(x.textContent))) || ctrls.find((x) => clean(x.textContent));
     if (gift) {
       gift.click();
-      dlg = await waitDialog((t) => GOT.test(t) || APP_ONLY.test(t), 10000) || dlg;
+      dlg = await waitDialog((t) => GOT.test(t) || APP_ONLY.test(t), 30000) || dlg;
       txt = clean(dlg.innerText);
       if (APP_ONLY.test(txt)) return { status: 'app_only', email, info: 'the website asks you to claim in the Play Store app on Android' };
+      // The prize animation did not finish: don't close the dialog (that could cancel the claim); reload-check and retry later
+      if (!GOT.test(txt)) return { status: 'clicked', email, info, result: 'clicked the gift but the prize animation did not finish' + bg };
     }
   }
-  result = txt.replace(/^Close dialog\s*|^關閉對話方塊\s*/i, '').slice(0, 120);
+  result = txt.replace(/^Close dialog\s*|^關閉對話方塊\s*/i, '').slice(0, 120) + bg;
   // Step 3: close the dialog
   const closeBtn = dlg.querySelector('[aria-label="Close dialog"],[aria-label="關閉對話方塊"],[aria-label*="Close"],[aria-label*="關閉"]');
   if (closeBtn) closeBtn.click();

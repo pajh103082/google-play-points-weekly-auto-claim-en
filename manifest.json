@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Google Play Points Weekly Prize Auto Claim",
-  "version": "1.2.4",
+  "version": "1.2.5",
   "description": "Automatically claims the Google Play Points weekly prize for every Google account signed in to Chrome.",
   "permissions": [
     "alarms",
@@ -33,5 +33,17 @@
     "32": "icons/icon32.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
-  }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://play.google.com/store/points/*"
+      ],
+      "js": [
+        "raf_shim.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ]
 }

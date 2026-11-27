@@ -14,7 +14,7 @@ Automatically claims the **Google Play Points weekly prize** for **every Google 
 - **Skips what is already claimed**: a grey button whose "Available on …" date is still in the future means this week's prize is already claimed, so no page is opened again
 - **Knows "not available yet"**: the date has arrived but the button is still grey → tries again 2 hours later
 - **Skips accounts that can never get a prize**: not a Play Points member, or the Perks tab says "Your unlocked perks will show up here as you level up". These are not failures, so their page is not opened every time; the result carries over to the next week and they are re-checked automatically every 4 weeks (in case the account joins or earns points later)
-- Runs in a background tab that closes itself; shows a Windows notification when something is claimed or needs attention
+- Runs in a background tab that closes itself; **works even when Chrome is minimized or the tab is in the background** (`raf_shim.js` drives the claim animation in hidden tabs); shows a Windows notification when something is claimed or needs attention
 - Toolbar badge shows how many accounts are still pending; ✓ when everything is done
 
 ## What's included
@@ -113,6 +113,7 @@ The extension writes "is this week handled?" to `Downloads\ChromeExtensionStatus
 |---|---|
 | `https://play.google.com/*` | Open the Play Points Perks page, read the weekly prize button and click it |
 | `tabs`, `scripting` | Open a background tab and run the check inside the page |
+| (content script `raf_shim.js`) | Only on Play Points pages and only while the tab is hidden: drives the claim dialog's animation that Chrome pauses in hidden tabs; does nothing while the tab is visible |
 | `alarms` | Wake up every 30 minutes to see whether a run is needed |
 | `storage` | Remember each account's status for this week |
 | `notifications` | Tell you when something is claimed or needs attention |
